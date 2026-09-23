@@ -1,0 +1,399 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retail snapshot lake with Glue 5.0, Athena, and optional private Redshift Serverless.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: retail-pipeline
+    AllowedPattern: '[a-z][a-z0-9-]{0,39}'
+    Description: Short lowercase identifier used in service resource names.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+  DeployRedshift:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Opt in to billable Redshift resources after supplying VPC subnets and security groups.
+  RedshiftSubnetIds:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^subnet-[0-9a-f]+(,subnet-[0-9a-f]+){2,}$'
+    Description: Existing private subnet IDs in the same VPC, spanning three Availability Zones.
+  RedshiftSecurityGroupIds:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^sg-[0-9a-f]+(,sg-[0-9a-f]+)*$'
+    Description: Existing security groups in the subnet VPC. No public ingress is needed for Data API.
+  RedshiftDatabaseName:
+    Type: String
+    Default: analytics
+    AllowedPattern: '[a-z][a-z0-9_]{0,62}'
+  RedshiftBaseCapacity:
+    Type: Number
+    Default: 8
+    AllowedValues: [8, 16, 32]
+  RedshiftMaxCapacity:
+    Type: Number
+    Default: 32
+    AllowedValues: [32, 64, 128]
+
+Rules:
+  RedshiftNetworkRequired:
+    RuleCondition: !Equals [!Ref DeployRedshift, 'true']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref RedshiftSubnetIds, '']]
+        AssertDescription: Supply existing private subnets when DeployRedshift is true.
+      - Assert: !Not [!Equals [!Ref RedshiftSecurityGroupIds, '']]
+        AssertDescription: Supply existing security groups when DeployRedshift is true.
+
+Conditions:
+  CreateRedshift: !And
+    - !Equals [!Ref DeployRedshift, 'true']
+    - !Not [!Equals [!Ref RedshiftSubnetIds, '']]
+    - !Not [!Equals [!Ref RedshiftSecurityGroupIds, '']]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireScratchFiles
+            Status: Enabled
+            Prefix: temp/
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: ExpireAthenaResults
+            Status: Enabled
+            Prefix: query-results/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: ExpireSparkEvents
+            Status: Enabled
+            Prefix: spark-events/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub '${DataBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  GlueExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelineDataAndLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BucketMetadata
+                Effect: Allow
+                Action: [s3:GetBucketLocation, s3:ListBucketMultipartUploads]
+                Resource: !GetAtt DataBucket.Arn
+              - Sid: ListPipelinePrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - raw/*
+                      - artifacts/*
+                      - silver/*
+                      - gold/*
+                      - quarantine/*
+                      - manifests/*
+                      - audit/*
+                      - temp/*
+                      - spark-events/*
+              - Sid: ReadInputsAndOutputs
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource:
+                  - !Sub '${DataBucket.Arn}/raw/*'
+                  - !Sub '${DataBucket.Arn}/artifacts/*'
+                  - !Sub '${DataBucket.Arn}/silver/*'
+                  - !Sub '${DataBucket.Arn}/gold/*'
+                  - !Sub '${DataBucket.Arn}/quarantine/*'
+                  - !Sub '${DataBucket.Arn}/manifests/*'
+                  - !Sub '${DataBucket.Arn}/audit/*'
+                  - !Sub '${DataBucket.Arn}/temp/*'
+                  - !Sub '${DataBucket.Arn}/spark-events/*'
+              - Sid: WriteDerivedData
+                Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload, s3:ListMultipartUploadParts]
+                Resource:
+                  - !Sub '${DataBucket.Arn}/silver/*'
+                  - !Sub '${DataBucket.Arn}/gold/*'
+                  - !Sub '${DataBucket.Arn}/quarantine/*'
+                  - !Sub '${DataBucket.Arn}/manifests/*'
+                  - !Sub '${DataBucket.Arn}/audit/*'
+                  - !Sub '${DataBucket.Arn}/temp/*'
+                  - !Sub '${DataBucket.Arn}/spark-events/*'
+              - Sid: JobLogs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/${AWS::StackName}/*'
+              - Sid: JobMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Glue
+
+  GlueErrorLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/${AWS::StackName}/error'
+      RetentionInDays: 30
+
+  GlueOutputLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/${AWS::StackName}/output'
+      RetentionInDays: 30
+
+  GlueInsightsLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/${AWS::StackName}/insights'
+      RetentionInDays: 30
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Join ['_', [!Join ['_', !Split ['-', !Ref ProjectName]], !Ref Environment]]
+        Description: Projected retail snapshot tables provisioned by the Athena SQL templates.
+
+  RetailGlueJob:
+    Type: AWS::Glue::Job
+    DependsOn: [GlueErrorLogs, GlueOutputLogs, GlueInsightsLogs]
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-etl'
+      Description: Validate a full retail snapshot and write immutable silver/gold Parquet run prefixes.
+      Role: !GetAtt GlueExecutionRole.Arn
+      GlueVersion: '5.0'
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 60
+      MaxRetries: 0
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub 's3://${DataBucket}/artifacts/glue/retail_etl.py'
+      DefaultArguments:
+        --job-language: python
+        --job-bookmark-option: job-bookmark-disable
+        --enable-metrics: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-job-insights: 'true'
+        --continuous-log-logGroup: !Sub '/aws-glue/${AWS::StackName}/insights'
+        --enable-spark-ui: 'true'
+        --spark-event-logs-path: !Sub 's3://${DataBucket}/spark-events/'
+        --custom-logGroup-prefix: !Sub '/aws-glue/${AWS::StackName}'
+        --TempDir: !Sub 's3://${DataBucket}/temp/'
+        --extra-py-files: !Sub 's3://${DataBucket}/artifacts/retail_pipeline.zip'
+        --DATA_BUCKET: !Ref DataBucket
+        --RAW_BATCH_DATE: '2026-01-15'
+        --MAX_REJECT_RATIO: '0.4'
+      Tags:
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
+
+  GlueFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Glue failed. Inspect CloudWatch logs and the immutable run manifest before retrying with a new run ID.
+      Namespace: Glue
+      MetricName: glue.error.ALL
+      Dimensions:
+        - Name: JobName
+          Value: !Ref RetailGlueJob
+        - Name: JobRunId
+          Value: ALL
+        - Name: Type
+          Value: count
+        - Name: ObservabilityGroup
+          Value: error
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-analytics'
+      Description: Retail analytics with enforced encrypted results and a 1 GiB per-query scan limit.
+      State: ENABLED
+      RecursiveDeleteOption: false
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 1073741824
+        EngineVersion:
+          SelectedEngineVersion: Athena engine version 3
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${DataBucket}/query-results/'
+          ExpectedBucketOwner: !Ref AWS::AccountId
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  RedshiftCopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [redshift.amazonaws.com, redshift-serverless.amazonaws.com]
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadGoldAndManifests
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetBucketLocation
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: [gold/*, manifests/*]
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub '${DataBucket.Arn}/gold/*'
+                  - !Sub '${DataBucket.Arn}/manifests/*'
+
+  RedshiftNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Condition: CreateRedshift
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      NamespaceName: !Sub '${ProjectName}-${Environment}-warehouse'
+      DbName: !Ref RedshiftDatabaseName
+      AdminUsername: retail_admin
+      ManageAdminPassword: true
+      DefaultIamRoleArn: !GetAtt RedshiftCopyRole.Arn
+      IamRoles:
+        - !GetAtt RedshiftCopyRole.Arn
+      LogExports: [userlog, connectionlog, useractivitylog]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  RedshiftWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Condition: CreateRedshift
+    Properties:
+      WorkgroupName: !Sub '${ProjectName}-${Environment}-redshift'
+      NamespaceName: !Ref RedshiftNamespace
+      BaseCapacity: !Ref RedshiftBaseCapacity
+      MaxCapacity: !Ref RedshiftMaxCapacity
+      PubliclyAccessible: false
+      EnhancedVpcRouting: true
+      SubnetIds: !Split [',', !Ref RedshiftSubnetIds]
+      SecurityGroupIds: !Split [',', !Ref RedshiftSecurityGroupIds]
+      ConfigParameters:
+        - ParameterKey: require_ssl
+          ParameterValue: 'true'
+        - ParameterKey: enable_user_activity_logging
+          ParameterValue: 'true'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  DataBucketName:
+    Value: !Ref DataBucket
+  GlueJobName:
+    Value: !Ref RetailGlueJob
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+  GlueExecutionRoleArn:
+    Value: !GetAtt GlueExecutionRole.Arn
+  AthenaWorkGroupName:
+    Value: !Ref AthenaWorkGroup
+  RedshiftCopyRoleArn:
+    Value: !GetAtt RedshiftCopyRole.Arn
+  GlueFailureAlarmName:
+    Value: !Ref GlueFailureAlarm
+  RedshiftNamespaceName:
+    Condition: CreateRedshift
+    Value: !Ref RedshiftNamespace
+  RedshiftWorkgroupName:
+    Condition: CreateRedshift
+    Value: !Ref RedshiftWorkgroup
+  RedshiftDatabaseName:
+    Condition: CreateRedshift
+    Value: !Ref RedshiftDatabaseName

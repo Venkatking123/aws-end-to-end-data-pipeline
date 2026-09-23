@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77,<81", "wheel>=0.45,<0.46"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws-retail-data-pipeline"
+version = "1.0.0"
+description = "Validated retail snapshots from S3 and Glue to Athena and Redshift"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["boto3==1.37.38", "sqlparse==0.5.3"]
+
+[project.optional-dependencies]
+spark = ["pyspark==3.5.4"]
+dev = ["pytest==8.3.5", "ruff==0.11.13", "cfn-lint==1.35.2", "build==1.2.2.post1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["spark: requires Java 17 and local Spark 3.5.4"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"glue/*.py" = ["E402"]

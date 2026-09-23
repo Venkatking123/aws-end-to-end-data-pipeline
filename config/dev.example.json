@@ -1,0 +1,15 @@
+{
+  "region": "us-east-1",
+  "stack_name": "retail-pipeline-dev",
+  "project_name": "retail-pipeline",
+  "environment": "dev",
+  "max_reject_ratio": 0.4,
+  "poll_seconds": 15,
+  "timeout_seconds": 3600,
+  "deploy_redshift": false,
+  "redshift_database": "analytics",
+  "redshift_workgroup": "",
+  "redshift_secret_arn": "",
+  "redshift_subnet_ids": "",
+  "redshift_security_group_ids": ""
+}

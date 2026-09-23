@@ -1,0 +1,49 @@
+name: Validate pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: python -m pip install -e '.[spark,dev]'
+      - run: python -m pip check
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: cfn-lint infrastructure/cloudformation.yaml
+      - run: python -m compileall -q src scripts glue
+      - run: git diff --check
+      - run: pytest -q --junitxml=build/test-results.xml
+        env:
+          SPARK_LOCAL_IP: 127.0.0.1
+      - run: python scripts/package_glue.py
+      - run: python -m build
+      - run: python -m retail_pipeline.local --run-id ci-demo --max-reject-ratio 0.40
+        env:
+          SPARK_LOCAL_IP: 127.0.0.1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-artifacts
+          path: |
+            dist/
+            build/test-results.xml
+            build/local/manifests/ci-demo/success.json

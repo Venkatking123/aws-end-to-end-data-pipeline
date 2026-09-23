@@ -1,0 +1,13 @@
+{
+  "input_count": 20,
+  "valid_count": 10,
+  "rejected_count": 8,
+  "duplicate_count": 2,
+  "completed_line_count": 9,
+  "cancelled_line_count": 1,
+  "gold_count": 7,
+  "gross_amount": "616.50",
+  "discount_amount": "56.00",
+  "net_amount": "560.50",
+  "units": 20
+}
