@@ -35,8 +35,8 @@ def main():
     try:
         metrics = execute(
             spark,
-            Path(args.input).resolve().as_uri(),
-            root.as_uri(),
+            Path(args.input).resolve().as_posix(),
+            root.as_posix(),
             args.run_id,
             args.max_reject_ratio,
         )

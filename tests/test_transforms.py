@@ -250,7 +250,7 @@ def test_group_decimal_overflow_remains_visible_to_publication_quality_gate(spar
 
 @pytest.mark.spark
 def test_csv_reader_preserves_quoted_commas_and_quarantines_bad_width(spark, tmp_path):
-    path = tmp_path / "records.csv"
+    path = tmp_path / "records = 100%.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(RAW_COLUMNS)

@@ -47,9 +47,10 @@ def test_quality_gate_rejects_invalid_threshold(maximum):
 
 @pytest.mark.spark
 def test_execute_persists_sample_datasets_and_exact_metrics(spark, tmp_path):
+    tmp_path = tmp_path / "snapshot = data"
     expected = json.loads((PROJECT_ROOT / "data/expected/sample_metrics.json").read_text())
     run_id = "sample-publication"
-    metrics = execute(spark, SAMPLE_INPUT.as_uri(), tmp_path.as_uri(), run_id, 0.4)
+    metrics = execute(spark, SAMPLE_INPUT.as_posix(), tmp_path.as_posix(), run_id, 0.4)
 
     assert metrics.as_dict() == {
         "run_id": run_id,
@@ -67,7 +68,8 @@ def test_execute_persists_sample_datasets_and_exact_metrics(spark, tmp_path):
         "rejected": tmp_path / "quarantine" / f"run_id={run_id}" / "data",
         "duplicates": tmp_path / "audit/duplicates" / f"run_id={run_id}" / "data",
     }
-    frames = {name: spark.read.parquet(path.as_uri()) for name, path in paths.items()}
+    # Hadoop interprets percent escapes literally; preserve partition '=' characters.
+    frames = {name: spark.read.parquet(path.as_posix()) for name, path in paths.items()}
     assert frames["silver"].count() == expected["valid_count"]
     assert frames["gold"].count() == expected["gold_count"]
     assert frames["rejected"].count() == expected["rejected_count"]
@@ -97,12 +99,12 @@ def test_execute_persists_sample_datasets_and_exact_metrics(spark, tmp_path):
 def test_failed_quality_gate_preserves_audit_without_publishing_sales(spark, tmp_path):
     run_id = "rejected-publication"
     with pytest.raises(QualityError, match="Quality gate failed"):
-        execute(spark, SAMPLE_INPUT.as_uri(), tmp_path.as_uri(), run_id, 0.39)
+        execute(spark, SAMPLE_INPUT.as_posix(), tmp_path.as_posix(), run_id, 0.39)
 
     quarantine = tmp_path / "quarantine" / f"run_id={run_id}" / "data"
     duplicates = tmp_path / "audit/duplicates" / f"run_id={run_id}" / "data"
-    assert spark.read.parquet(quarantine.as_uri()).count() == 8
-    assert spark.read.parquet(duplicates.as_uri()).count() == 2
+    assert spark.read.parquet(quarantine.as_posix()).count() == 8
+    assert spark.read.parquet(duplicates.as_posix()).count() == 2
     assert not (tmp_path / "silver").exists()
     assert not (tmp_path / "gold").exists()
     assert not (tmp_path / "manifests").exists()

@@ -68,7 +68,9 @@ def read_raw(spark: SparkSession, path: str) -> DataFrame:
     parse_line = F.udf(_parse_csv_line, parser_schema)
     lines = spark.read.text(path).withColumn("_source_file", F.input_file_name())
     for filename in lines.inputFiles():
-        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(filename)
+        # inputFiles returns escaped URIs; the string Path constructor would
+        # escape '%' again and look for a different file on disk or in S3.
+        hadoop_path = spark._jvm.org.apache.hadoop.fs.Path(spark._jvm.java.net.URI(filename))
         filesystem = hadoop_path.getFileSystem(spark._jsc.hadoopConfiguration())
         stream = filesystem.open(hadoop_path)
         try:

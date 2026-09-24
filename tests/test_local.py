@@ -28,7 +28,7 @@ def local_runtime(monkeypatch, tmp_path):
         [
             "retail_pipeline.local",
             "--input",
-            str(tmp_path / "input.csv"),
+            str(tmp_path / "input snapshot.csv"),
             "--output-dir",
             str(tmp_path / "output"),
             "--run-id",
@@ -55,8 +55,8 @@ def test_local_publishes_metrics_after_execution(local_runtime, tmp_path, capsys
 
     runner.assert_called_once_with(
         session,
-        (tmp_path / "input.csv").as_uri(),
-        (tmp_path / "output").as_uri(),
+        (tmp_path / "input snapshot.csv").as_posix(),
+        (tmp_path / "output").as_posix(),
         "local-run",
         0.4,
     )
